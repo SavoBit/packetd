@@ -5,6 +5,9 @@ github.com/GehirnInc/crypt/common
 github.com/GehirnInc/crypt/internal
 # github.com/c9s/goprocinfo v0.0.0-20190309065803-0b2ad9ac246b
 github.com/c9s/goprocinfo/linux
+# github.com/eclipse/paho.mqtt.golang v1.2.0
+github.com/eclipse/paho.mqtt.golang
+github.com/eclipse/paho.mqtt.golang/packets
 # github.com/gbrlsnchs/jwt/v3 v3.0.0-beta.0
 github.com/gbrlsnchs/jwt/v3
 # github.com/gin-contrib/location v0.0.0-20190528141421-4d994432eb13
@@ -24,8 +27,8 @@ github.com/gin-gonic/gin/render
 # github.com/golang/protobuf v1.3.2
 github.com/golang/protobuf/proto
 # github.com/google/gopacket v1.1.17
-github.com/google/gopacket/layers
 github.com/google/gopacket
+github.com/google/gopacket/layers
 # github.com/gorilla/context v1.1.1
 github.com/gorilla/context
 # github.com/gorilla/securecookie v1.1.1
@@ -48,17 +51,20 @@ github.com/oschwald/geoip2-golang
 github.com/oschwald/maxminddb-golang
 # github.com/ugorji/go/codec v1.1.7
 github.com/ugorji/go/codec
-# golang.org/x/crypto v0.0.0-20190701094942-4def268fd1a4
+# golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9
 golang.org/x/crypto/ed25519
 golang.org/x/crypto/ed25519/internal/edwards25519
-# golang.org/x/net v0.0.0-20190724013045-ca1201d0de80
+# golang.org/x/net v0.0.0-20200813134508-3edf25e44fcc
 golang.org/x/net/icmp
 golang.org/x/net/ipv4
 golang.org/x/net/ipv6
 golang.org/x/net/internal/iana
 golang.org/x/net/internal/socket
 golang.org/x/net/bpf
-# golang.org/x/sys v0.0.0-20190726091711-fc99dfbffb4e
+golang.org/x/net/proxy
+golang.org/x/net/websocket
+golang.org/x/net/internal/socks
+# golang.org/x/sys v0.0.0-20200323222414-85ca7c5b95cd
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 # gopkg.in/go-playground/validator.v8 v8.18.2
