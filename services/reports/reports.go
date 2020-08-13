@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	MQTT "github.com/eclipse/paho.mqtt.golang"
 	"github.com/mattn/go-sqlite3"
 	"github.com/untangle/packetd/services/kernel"
 	"github.com/untangle/packetd/services/logger"
@@ -131,6 +132,8 @@ const dbFREEMINIMUM int64 = 32768
 // dbSizeLimit is the calculated maximum size for the database file
 var dbSizeLimit int64
 
+var mqttClient MQTT.Client
+
 // Startup starts the reports service
 func Startup() {
 	var stat syscall.Statfs_t
@@ -175,6 +178,9 @@ func Startup() {
 	if !kernel.FlagNoCloud {
 		go cloudSender()
 	}
+
+	setupMosquitto()
+
 }
 
 // Shutdown stops the reports service
@@ -358,14 +364,41 @@ func CreateEvent(name string, table string, sqlOp int, columns map[string]interf
 
 // LogEvent adds an event to the eventQueue for later logging
 func LogEvent(event Event) error {
-	select {
-	case eventQueue <- event:
-	default:
-		// log the message with the OC verb passing the counter name and the repeat message limit as the first two arguments
-		logger.Warn("%OC|Event queue at capacity[%d]. Dropping event: %v\n", "reports_event_queue_full", 100, cap(eventQueue), event)
-		return errors.New("Event Queue at Capacity")
+
+	//mqttClient.Publish("Events", 0, false, "testing event")
+	jsEvt, err := json.Marshal(event)
+
+	if err != nil {
+		logger.Err("LogEvent failure during marshal:%s\n", err)
+		return nil
 	}
+
+	tkn := mqttClient.Publish("Events", 0, false, jsEvt)
+
+	// We do not wait for this because we are only concerned with instant token errors from the client, IE: Invalid payload type
+	logger.Err("Token response error:%s\n", tkn.Error)
+
 	return nil
+}
+
+func setupMosquitto() {
+
+	logger.Info("Setting up mosquitto...\n")
+
+	opts := MQTT.NewClientOptions()
+	opts.AddBroker("tcp://localhost:1883")
+	opts.SetClientID("packetd")
+	// MQTT has simple persistence storage that can be configured
+	//opts.SetStore(MQTT.NewFileStore())
+
+	mqttClient = MQTT.NewClient(opts)
+
+	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
+		logger.Err("Unable to open mosquitto daemon: %s\n", token.Error())
+	} else {
+		logger.Info("Mosquitto channel opened: %s\n", token)
+	}
+
 }
 
 // eventLogger readns from the eventQueue and logs the events to sqlite
