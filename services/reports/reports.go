@@ -374,8 +374,10 @@ func LogEvent(event Event) error {
 
 	tkn := mqttClient.Publish("Events", 0, false, jsEvt)
 
-	// We do not wait for this because we are only concerned with instant token errors from the client, IE: Invalid payload type
-	logger.Err("Token response error:%s\n", tkn.Error)
+	if tkn.Error() != nil {
+		// We do not wait for this because we are only concerned with instant token errors from the client, IE: Invalid payload type
+		logger.Err("Token response error:%s\n", tkn.Error())
+	}
 
 	return nil
 }
