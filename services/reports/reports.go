@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-sqlite3"
+	zmq "github.com/pebbe/zmq4"
 	"github.com/untangle/packetd/services/kernel"
 	"github.com/untangle/packetd/services/logger"
 	"github.com/untangle/packetd/services/settings"
@@ -131,6 +132,9 @@ const dbFREEMINIMUM int64 = 32768
 // dbSizeLimit is the calculated maximum size for the database file
 var dbSizeLimit int64
 
+var zmqPublisher *zmq.Socket
+var zmqSubscriber *zmq.Socket
+
 // Startup starts the reports service
 func Startup() {
 	var stat syscall.Statfs_t
@@ -174,12 +178,16 @@ func Startup() {
 
 	createTables()
 
+	setupPublisher()
+	setupSubscriber()
+
 	go eventLogger(eventBatchSize)
 	go dbCleaner()
 
 	if !kernel.FlagNoCloud {
 		go cloudSender()
 	}
+
 }
 
 // Shutdown stops the reports service
@@ -357,14 +365,46 @@ func CreateEvent(name string, table string, sqlOp int, columns map[string]interf
 
 // LogEvent adds an event to the eventQueue for later logging
 func LogEvent(event Event) error {
-	select {
-	case eventQueue <- event:
-	default:
-		// log the message with the OC verb passing the counter name and the repeat message limit as the first two arguments
-		logger.Warn("%OC|Event queue at capacity[%d]. Dropping event: %v\n", "reports_event_queue_full", 100, cap(eventQueue), event)
-		return errors.New("Event Queue at Capacity")
+
+	jsEvt, err := json.Marshal(event)
+
+	if err != nil {
+		logger.Err("LogEvent failure during marshal:%s\n", err)
+		return nil
 	}
+
+	// Open the publisher socket
+	resp, err := zmqPublisher.Send(string(jsEvt), 0)
+	if err != nil {
+		logger.Err("ZMQ Publish failed :%v\n", err)
+	}
+
+	logger.Info("ZMQ Publish response: %s", resp)
+
+	zmqPublisher.Close()
+
 	return nil
+}
+
+func setupPublisher() {
+	logger.Info("Setting up Zero MQ Publisher...\n")
+
+	zmqPublisher, _ := zmq.NewSocket(zmq.PUB)
+
+	zmqPublisher.Bind("tcp://localhost:5556")
+	zmqPublisher.Bind("ipc://events.ipc")
+}
+
+func setupSubscriber() {
+	logger.Info("Setting up Zero MQ Subscriber...\n")
+
+	zmqSubscriber, _ := zmq.NewSocket(zmq.SUB)
+
+	zmqSubscriber.Bind("tcp://localhost:5556")
+	//zmqSubscriber.Bind("ipc://events.ipc")
+
+	zmqSubscriber.SetSubscribe("")
+
 }
 
 // eventLogger readns from the eventQueue and logs the events to sqlite
@@ -373,41 +413,46 @@ func LogEvent(event Event) error {
 // unread on the channel until the current batch is committed into the database
 // param eventBatchSize (int) - the size of the batch to commit into the database
 func eventLogger(eventBatchSize int) {
-	var eventBatch []Event
-	var lastInsert time.Time
-	waitTime := 60.0
 
 	for {
-		// read data out of the eventQueue into the eventBatch
-		eventBatch = append(eventBatch, <-eventQueue)
+		msg, _ := zmqSubscriber.Recv(0)
 
-		// when the batch is larger than the configured batch insert size OR we haven't inserted anything in one minute, we need to insert some stuff
-		batchCount := len(eventBatch)
-		if batchCount >= eventBatchSize || time.Since(lastInsert).Seconds() > waitTime {
-			logger.Debug("%v Items ready for batch, starting transaction at %v...\n", batchCount, time.Now())
-
-			tx, err := dbMain.Begin()
-			if err != nil {
-				logger.Warn("Failed to begin transaction: %s\n", err.Error())
-			}
-
-			//iterate events in the batch and send them into the db transaction
-			for _, event := range eventBatch {
-				eventToTransaction(event, tx)
-			}
-
-			// end transaction
-			err = tx.Commit()
-			if err != nil {
-				tx.Rollback()
-				logger.Warn("Failed to commit transaction: %s\n", err.Error())
-			}
-
-			logger.Debug("Transaction completed, %v items processed at %v .\n", batchCount, lastInsert)
-			eventBatch = nil
-			lastInsert = time.Now()
+		if msgs := strings.Fields(msg); len(msgs) > 1 {
+			logger.Info("Message from queue: %v", msgs)
 		}
 	}
+
+	// for {
+	// 	// read data out of the eventQueue into the eventBatch
+	// 	eventBatch = append(eventBatch, <-eventQueue)
+
+	// 	// when the batch is larger than the configured batch insert size OR we haven't inserted anything in one minute, we need to insert some stuff
+	// 	batchCount := len(eventBatch)
+	// 	if batchCount >= eventBatchSize || time.Since(lastInsert).Seconds() > waitTime {
+	// 		logger.Debug("%v Items ready for batch, starting transaction at %v...\n", batchCount, time.Now())
+
+	// 		tx, err := dbMain.Begin()
+	// 		if err != nil {
+	// 			logger.Warn("Failed to begin transaction: %s\n", err.Error())
+	// 		}
+
+	// 		//iterate events in the batch and send them into the db transaction
+	// 		for _, event := range eventBatch {
+	// 			eventToTransaction(event, tx)
+	// 		}
+
+	// 		// end transaction
+	// 		err = tx.Commit()
+	// 		if err != nil {
+	// 			tx.Rollback()
+	// 			logger.Warn("Failed to commit transaction: %s\n", err.Error())
+	// 		}
+
+	// 		logger.Debug("Transaction completed, %v items processed at %v .\n", batchCount, lastInsert)
+	// 		eventBatch = nil
+	// 		lastInsert = time.Now()
+	// 	}
+	// }
 
 }
 
