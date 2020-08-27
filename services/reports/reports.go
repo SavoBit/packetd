@@ -132,8 +132,7 @@ const dbFREEMINIMUM int64 = 32768
 // dbSizeLimit is the calculated maximum size for the database file
 var dbSizeLimit int64
 
-var zmqPublisher *zmq.Socket
-var zmqSubscriber *zmq.Socket
+const zmqPort = "tcp://127.0.0.1:9092"
 
 // Startup starts the reports service
 func Startup() {
@@ -177,11 +176,11 @@ func Startup() {
 	dbMain.SetMaxIdleConns(2)
 
 	createTables()
+	zmqSub := createSubscriber()
+	zmqPub := createPublisher()
+	go eventLogger(eventBatchSize, zmqPub)
+	go eventSubscriber(zmqSub)
 
-	setupPublisher()
-	setupSubscriber()
-
-	go eventLogger(eventBatchSize)
 	go dbCleaner()
 
 	if !kernel.FlagNoCloud {
@@ -366,45 +365,55 @@ func CreateEvent(name string, table string, sqlOp int, columns map[string]interf
 // LogEvent adds an event to the eventQueue for later logging
 func LogEvent(event Event) error {
 
-	jsEvt, err := json.Marshal(event)
-
-	if err != nil {
-		logger.Err("LogEvent failure during marshal:%s\n", err)
-		return nil
+	select {
+	case eventQueue <- event:
+	default:
+		// log the message with the OC verb passing the counter name and the repeat message limit as the first two arguments
+		logger.Warn("%OC|Event queue at capacity[%d]. Dropping event: %v\n", "reports_event_queue_full", 100, cap(eventQueue), event)
+		return errors.New("Event Queue at Capacity")
 	}
-
-	// Open the publisher socket
-	resp, err := zmqPublisher.Send(string(jsEvt), 0)
-	if err != nil {
-		logger.Err("ZMQ Publish failed :%v\n", err)
-	}
-
-	logger.Info("ZMQ Publish response: %s", resp)
-
-	zmqPublisher.Close()
-
 	return nil
 }
 
-func setupPublisher() {
-	logger.Info("Setting up Zero MQ Publisher...\n")
+func createPublisher() *zmq.Socket {
+	logger.Info("Creating zmq publisher...\n")
 
-	zmqPublisher, _ := zmq.NewSocket(zmq.PUB)
+	zmqPublisher, err := zmq.NewSocket(zmq.PUB)
+	if err != nil {
+		logger.Err("Unable to create Publisher: %v\n", err)
+	}
+	err = zmqPublisher.SetLinger(0)
+	if err != nil {
+		logger.Err("Unable to SetLinger to Publisher: %v\n", err)
+	}
+	err = zmqPublisher.Bind(zmqPort)
+	if err != nil {
+		logger.Err("Unable to Bind to Publisher: %v\n", err)
+	}
 
-	zmqPublisher.Bind("tcp://localhost:5556")
-	zmqPublisher.Bind("ipc://events.ipc")
+	return zmqPublisher
 }
 
-func setupSubscriber() {
-	logger.Info("Setting up Zero MQ Subscriber...\n")
+func createSubscriber() *zmq.Socket {
+	logger.Info("Creating zmq subscriber...\n")
+	zmqSubscriber, err := zmq.NewSocket(zmq.SUB)
+	if err != nil {
+		logger.Err("Unable to create subscriber: %v\n", err)
+	}
+	err = zmqSubscriber.SetLinger(0)
+	if err != nil {
+		logger.Err("Unable to SetLinger to subscriber: %v\n", err)
+	}
+	err = zmqSubscriber.Connect(zmqPort)
+	if err != nil {
+		logger.Err("Unable to Connect to subscriber: %v\n", err)
+	}
+	err = zmqSubscriber.SetSubscribe("")
+	if err != nil {
+		logger.Err("Unable to Set Subscribe: %v\n", err)
+	}
 
-	zmqSubscriber, _ := zmq.NewSocket(zmq.SUB)
-
-	zmqSubscriber.Bind("tcp://localhost:5556")
-	//zmqSubscriber.Bind("ipc://events.ipc")
-
-	zmqSubscriber.SetSubscribe("")
-
+	return zmqSubscriber
 }
 
 // eventLogger readns from the eventQueue and logs the events to sqlite
@@ -412,48 +421,50 @@ func setupSubscriber() {
 // items that are not in the current batch will remain
 // unread on the channel until the current batch is committed into the database
 // param eventBatchSize (int) - the size of the batch to commit into the database
-func eventLogger(eventBatchSize int) {
-
+func eventLogger(eventBatchSize int, zmqPublisher *zmq.Socket) {
+	//Read items out of the event log queue and publish them
+	var eventBatch []Event
+	var lastInsert time.Time
+	waitTime := 60.0
 	for {
-		msg, _ := zmqSubscriber.Recv(0)
+		// read data out of the eventQueue into the eventBatch
+		eventBatch = append(eventBatch, <-eventQueue)
 
-		if msgs := strings.Fields(msg); len(msgs) > 1 {
-			logger.Info("Message from queue: %v", msgs)
+		// when the batch is larger than the configured batch insert size OR we haven't inserted anything in one minute, we need to insert some stuff
+		batchCount := len(eventBatch)
+		if batchCount >= eventBatchSize || time.Since(lastInsert).Seconds() > waitTime {
+			logger.Debug("%v Items ready for batch, starting transaction at %v...\n", batchCount, time.Now())
+			//iterate events in the batch and send them into the db transaction
+			for _, event := range eventBatch {
+				jsEvt, err := json.Marshal(event)
+
+				if err != nil {
+					logger.Err("LogEvent failure during marshal:%s\n", err)
+					continue
+				}
+
+				resp, err := zmqPublisher.Send(string(jsEvt), 0)
+
+				if err != nil {
+					logger.Err("ZMQ Publish failed :%v\n", err)
+				} else {
+					logger.Debug("ZMQ Publish success, byte length: %v\n", resp)
+				}
+			}
 		}
 	}
+}
 
-	// for {
-	// 	// read data out of the eventQueue into the eventBatch
-	// 	eventBatch = append(eventBatch, <-eventQueue)
+func eventSubscriber(zmqSubscriber *zmq.Socket) {
+	for {
+		msg, err := zmqSubscriber.Recv(0)
 
-	// 	// when the batch is larger than the configured batch insert size OR we haven't inserted anything in one minute, we need to insert some stuff
-	// 	batchCount := len(eventBatch)
-	// 	if batchCount >= eventBatchSize || time.Since(lastInsert).Seconds() > waitTime {
-	// 		logger.Debug("%v Items ready for batch, starting transaction at %v...\n", batchCount, time.Now())
-
-	// 		tx, err := dbMain.Begin()
-	// 		if err != nil {
-	// 			logger.Warn("Failed to begin transaction: %s\n", err.Error())
-	// 		}
-
-	// 		//iterate events in the batch and send them into the db transaction
-	// 		for _, event := range eventBatch {
-	// 			eventToTransaction(event, tx)
-	// 		}
-
-	// 		// end transaction
-	// 		err = tx.Commit()
-	// 		if err != nil {
-	// 			tx.Rollback()
-	// 			logger.Warn("Failed to commit transaction: %s\n", err.Error())
-	// 		}
-
-	// 		logger.Debug("Transaction completed, %v items processed at %v .\n", batchCount, lastInsert)
-	// 		eventBatch = nil
-	// 		lastInsert = time.Now()
-	// 	}
-	// }
-
+		if err != nil {
+			logger.Err("EventLogger: ZMQ Receive error: %s\n", err)
+			continue
+		}
+		logger.Info("ZMQ Receive Message from queue: %v\n", msg)
+	}
 }
 
 // eventToTransaction converts the Event object into a Sql Transaction and appends it into the current transaction context
